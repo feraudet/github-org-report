@@ -6,6 +6,7 @@ Contains the main GitHubRepoAnalyzer class for analyzing GitHub repositories.
 """
 
 import sys
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import requests
@@ -135,35 +136,100 @@ class GitHubRepoAnalyzer:
         """Get list of supported programming languages."""
         return sorted(list(set(self.code_type_mappings.values())))
     
-    def make_request(self, url: str, params: Optional[Dict] = None) -> Optional[Dict]:
+    def _wait_for_rate_limit_reset(self, reset_time: int, api_type: str = "Core"):
         """
-        Make a request to the GitHub API with error handling.
+        Wait for rate limit to reset with progress bar.
+        
+        Args:
+            reset_time: Unix timestamp when rate limit resets
+            api_type: Type of API (Core, Search, etc.)
+        """
+        current_time = int(time.time())
+        wait_time = max(0, reset_time - current_time + 5)  # Add 5 seconds buffer
+        
+        if wait_time > 0:
+            print(f"\n⚠️  {api_type} API rate limit exceeded!")
+            print(f"⏳ Waiting {wait_time} seconds for quota to reset...")
+            
+            # Progress bar for wait time
+            with tqdm(total=wait_time, desc=f"Rate limit cooldown ({api_type})", 
+                     unit="s", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+                for _ in range(wait_time):
+                    time.sleep(1)
+                    pbar.update(1)
+            
+            print("✅ Rate limit reset, resuming...")
+
+    def _check_rate_limit(self, response: requests.Response) -> bool:
+        """
+        Check if response indicates rate limit exceeded and handle it.
+        
+        Args:
+            response: HTTP response object
+            
+        Returns:
+            True if rate limit was hit and handled, False otherwise
+        """
+        if response.status_code == 403:
+            # Check if it's a rate limit error
+            rate_limit_remaining = response.headers.get('X-RateLimit-Remaining', '0')
+            rate_limit_reset = response.headers.get('X-RateLimit-Reset')
+            
+            if rate_limit_remaining == '0' and rate_limit_reset:
+                api_type = "Search" if "/search/" in response.url else "Core"
+                self._wait_for_rate_limit_reset(int(rate_limit_reset), api_type)
+                return True
+        
+        return False
+
+    def make_request(self, url: str, params: Optional[Dict] = None, max_retries: int = 3) -> Optional[Dict]:
+        """
+        Make a request to the GitHub API with rate limit handling and retry logic.
         
         Args:
             url: API endpoint URL
             params: Optional query parameters
+            max_retries: Maximum number of retries for rate limit
             
         Returns:
             JSON response data or None if request failed
         """
-        try:
-            response = requests.get(url, headers=self.headers, params=params, verify=self.verify_ssl)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.HTTPError as e:
-            if response.status_code == 404:
-                # Silent handling of 404 errors (empty repos, private repos, etc.)
+        for attempt in range(max_retries + 1):
+            try:
+                response = requests.get(url, headers=self.headers, params=params, verify=self.verify_ssl)
+                
+                # Check for rate limit before raising for status
+                if self._check_rate_limit(response):
+                    if attempt < max_retries:
+                        continue  # Retry after waiting
+                    else:
+                        print(f"❌ Max retries exceeded for rate limit on {url}")
+                        return None
+                
+                response.raise_for_status()
+                return response.json()
+                
+            except requests.exceptions.HTTPError as e:
+                if response.status_code == 404:
+                    # Silent handling of 404 errors (empty repos, private repos, etc.)
+                    return None
+                elif response.status_code == 409:
+                    # Handle 409 Conflict errors (usually branch/commit issues)
+                    print(f"Conflict error accessing {url} - repository may be empty or have branch issues")
+                    return None
+                elif response.status_code == 403 and attempt < max_retries:
+                    # Rate limit might not have proper headers, wait and retry
+                    print(f"⚠️  403 error, waiting 60 seconds before retry {attempt + 1}/{max_retries}")
+                    time.sleep(60)
+                    continue
+                else:
+                    print(f"HTTP Error making request to {url}: {e}")
+                    return None
+            except requests.exceptions.RequestException as e:
+                print(f"Error making request to {url}: {e}")
                 return None
-            elif response.status_code == 409:
-                # Handle 409 Conflict errors (usually branch/commit issues)
-                print(f"Conflict error accessing {url} - repository may be empty or have branch issues")
-                return None
-            else:
-                print(f"HTTP Error making request to {url}: {e}")
-                return None
-        except requests.exceptions.RequestException as e:
-            print(f"Error making request to {url}: {e}")
-            return None
+        
+        return None
     
     def get_all_repos(self, languages: List[str] = None) -> List[Dict]:
         """
@@ -429,23 +495,12 @@ class GitHubRepoAnalyzer:
         """
         total_commits = 0
         last_commit_date = None
-<<<<<<< Updated upstream
         
         # Try to get commit count from contributors API (most reliable)
         contributors_data = self.make_request(f"{self.base_url}/repos/{self.org}/{repo_name}/stats/contributors")
         if contributors_data and isinstance(contributors_data, list):
             # Sum up all commits from all contributors
             total_commits = sum(contributor.get('total', 0) for contributor in contributors_data)
-        
-=======
-        
-        # Try to get commit count from contributors API (most reliable)
-        contributors_data = self.make_request(f"{self.base_url}/repos/{self.org}/{repo_name}/stats/contributors")
-        if contributors_data and isinstance(contributors_data, list):
-            # Sum up all commits from all contributors
-            total_commits = sum(contributor.get('total', 0) for contributor in contributors_data)
-        
->>>>>>> Stashed changes
         # Fallback to pagination method if contributors API fails
         if total_commits == 0:
             total_commits, last_commit_date = self._get_commits_via_pagination(repo_name, default_branch)
@@ -565,10 +620,9 @@ class GitHubRepoAnalyzer:
             'order': 'desc'
         }
         
-        search_response = requests.get(search_url, headers=self.headers, params=search_params, verify=self.verify_ssl)
+        search_data = self.make_request(search_url, search_params)
         
-        if search_response.status_code == 200:
-            search_data = search_response.json()
+        if search_data:
             prs = search_data.get('items', [])
             
             if prs:
@@ -577,7 +631,7 @@ class GitHubRepoAnalyzer:
             else:
                 print(f"No closed PRs found via search API for {repo_name}")
         else:
-            print(f"Search API failed for {repo_name}: {search_response.status_code} - {search_response.text[:200]}")
+            print(f"Search API failed for {repo_name}")
         
         # Fallback: try direct pulls API with proper pagination
         print(f"Trying direct pulls API for {repo_name}...")
@@ -596,22 +650,21 @@ class GitHubRepoAnalyzer:
                 'direction': 'desc',
                 'page': page
             }
-            closed_response = requests.get(pulls_url, headers=self.headers, params=closed_params, verify=self.verify_ssl)
+            closed_data = self.make_request(pulls_url, closed_params)
             
-            if closed_response.status_code == 200:
-                closed_prs = closed_response.json()
-                if not closed_prs:  # No more PRs
+            if closed_data:
+                if not closed_data:  # No more PRs
                     break
                     
-                all_closed_prs.extend(closed_prs)
-                print(f"Found {len(closed_prs)} closed PRs on page {page} for {repo_name}")
+                all_closed_prs.extend(closed_data)
+                print(f"Found {len(closed_data)} closed PRs on page {page} for {repo_name}")
                 
-                if len(closed_prs) < 100:  # Last page
+                if len(closed_data) < 100:  # Last page
                     break
                     
                 page += 1
             else:
-                print(f"Pulls API failed on page {page} for {repo_name}: {closed_response.status_code}")
+                print(f"Pulls API failed on page {page} for {repo_name}")
                 break
         
         if all_closed_prs:
@@ -684,7 +737,12 @@ class GitHubRepoAnalyzer:
         total_lines_deleted = 0
         merged_count = 0
         
-        for pr in prs:
+        print(f"📊 Analyzing {len(prs)} PRs in detail...")
+        
+        # Progress bar for PR analysis
+        pr_progress = tqdm(prs, desc="Analyzing PRs", unit="PR", leave=False)
+        
+        for pr in pr_progress:
             pr_number = pr['number']
             pr_author = pr['user']['login']
             pr_title = pr.get('title', '').lower()
@@ -718,6 +776,9 @@ class GitHubRepoAnalyzer:
             else:
                 analysis['closed_without_merge'] += 1
             
+            # Update progress bar with current PR
+            pr_progress.set_postfix(PR=f"#{pr_number}")
+            
             # Get detailed PR information
             pr_details = self._get_pr_details(repo_name, pr_number)
             if pr_details:
@@ -738,6 +799,9 @@ class GitHubRepoAnalyzer:
             if review_analysis['multiple_reviewers']:
                 analysis['prs_with_multiple_reviewers'] += 1
         
+        # Close progress bar
+        pr_progress.close()
+        
         # Calculate averages
         if analysis['total_analyzed_prs'] > 0:
             analysis['avg_comments_per_pr'] = round(total_comments / analysis['total_analyzed_prs'], 1)
@@ -748,6 +812,7 @@ class GitHubRepoAnalyzer:
         if merged_count > 0:
             analysis['avg_time_to_merge_hours'] = round(total_merge_time / merged_count, 1)
         
+        print(f"✅ PR analysis completed: {analysis['total_analyzed_prs']} PRs processed")
         return analysis
     
     def _get_pr_details(self, repo_name: str, pr_number: int) -> Dict[str, Any]:

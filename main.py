@@ -55,10 +55,20 @@ Environment Variables:
         default='.',
         help='Output directory for generated files (default: current directory)'
     )
+    def validate_positive_int(value):
+        """Validate that the value is a positive integer."""
+        try:
+            ivalue = int(value)
+            if ivalue <= 0:
+                raise argparse.ArgumentTypeError(f"'{value}' must be a positive integer")
+            return ivalue
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"'{value}' is not a valid integer (check for special characters like Ø)")
+    
     parser.add_argument(
         '--limit',
-        type=int,
-        help='Maximum number of repositories to analyze'
+        type=validate_positive_int,
+        help='Maximum number of repositories to analyze (must be a positive integer)'
     )
     
     # Create temporary analyzer to get supported languages list
