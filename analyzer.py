@@ -154,6 +154,10 @@ class GitHubRepoAnalyzer:
             if response.status_code == 404:
                 # Silent handling of 404 errors (empty repos, private repos, etc.)
                 return None
+            elif response.status_code == 409:
+                # Handle 409 Conflict errors (usually branch/commit issues)
+                print(f"Conflict error accessing {url} - repository may be empty or have branch issues")
+                return None
             else:
                 print(f"HTTP Error making request to {url}: {e}")
                 return None
@@ -414,7 +418,7 @@ class GitHubRepoAnalyzer:
     
     def get_commit_stats(self, repo_name: str, default_branch: str) -> Dict[str, Any]:
         """
-        Get commit statistics for a repository.
+        Get commit statistics for the repository with improved error handling.
         
         Args:
             repo_name: Repository name
@@ -423,55 +427,24 @@ class GitHubRepoAnalyzer:
         Returns:
             Dictionary with commit statistics
         """
-        # Try to get total commits using contributors API (more efficient)
-        contributors_url = f"{self.base_url}/repos/{self.org}/{repo_name}/stats/contributors"
-        contributors_response = requests.get(contributors_url, headers=self.headers, verify=self.verify_ssl)
-        
         total_commits = 0
-        if contributors_response.status_code == 200:
-            contributors_data = contributors_response.json()
-            if contributors_data:  # Check if data is not empty
-                total_commits = sum(contributor['total'] for contributor in contributors_data)
-        
-        # If contributors API didn't work, fall back to paginating commits
-        if total_commits == 0:
-            commits_url = f"{self.base_url}/repos/{self.org}/{repo_name}/commits"
-            page = 1
-            per_page = 100
-            
-            while True:
-                params = {'page': page, 'per_page': per_page, 'sha': default_branch}
-                data = self.make_request(commits_url, params)
-                
-                if not data:
-                    break
-                
-                if page == 1 and len(data) < per_page:
-                    # Only one page, count directly
-                    total_commits = len(data)
-                    break
-                elif len(data) < per_page:
-                    # Last page, add remaining commits
-                    total_commits += len(data)
-                    break
-                else:
-                    # Full page, continue counting
-                    total_commits += per_page
-                
-                page += 1
-        
-        # Get last commit date
-        commits_url = f"{self.base_url}/repos/{self.org}/{repo_name}/commits"
-        commits_params = {'sha': default_branch, 'per_page': 1}
-        commits_response = requests.get(commits_url, headers=self.headers, params=commits_params, verify=self.verify_ssl)
-        
         last_commit_date = None
-        if commits_response.status_code == 200:
-            commits_data = commits_response.json()
-            if commits_data:
-                last_commit_date = commits_data[0]['commit']['committer']['date']
         
-        # Get direct pushes to default branch by analyzing commits without associated PRs
+        # Try to get commit count from contributors API (most reliable)
+        contributors_data = self.make_request(f"{self.base_url}/repos/{self.org}/{repo_name}/stats/contributors")
+        if contributors_data and isinstance(contributors_data, list):
+            # Sum up all commits from all contributors
+            total_commits = sum(contributor.get('total', 0) for contributor in contributors_data)
+        
+        # Fallback to pagination method if contributors API fails
+        if total_commits == 0:
+            total_commits, last_commit_date = self._get_commits_via_pagination(repo_name, default_branch)
+        
+        # Get last commit date if not already retrieved
+        if not last_commit_date:
+            last_commit_date = self._get_last_commit_date(repo_name, default_branch)
+        
+        # Get direct pushes to default branch
         direct_pushes = self.get_direct_pushes_count(repo_name, default_branch)
         
         return {
@@ -479,6 +452,89 @@ class GitHubRepoAnalyzer:
             'last_commit_date': last_commit_date,
             'direct_pushes_to_default': direct_pushes
         }
+    
+    def _get_commits_via_pagination(self, repo_name: str, default_branch: str) -> tuple[int, Optional[str]]:
+        """
+        Get commit count and last commit date via pagination with improved error handling.
+        
+        Args:
+            repo_name: Repository name
+            default_branch: Default branch name
+            
+        Returns:
+            Tuple of (total_commits, last_commit_date)
+        """
+        total_commits = 0
+        last_commit_date = None
+        page = 1
+        
+        # Try different branch names if default branch fails
+        branches_to_try = [default_branch, 'master', 'main', 'develop']
+        if default_branch not in branches_to_try:
+            branches_to_try.insert(0, default_branch)
+        
+        for branch in branches_to_try:
+            commits_url = f"{self.base_url}/repos/{self.org}/{repo_name}/commits"
+            commits_params = {'sha': branch, 'per_page': 100, 'page': 1}
+            
+            commits_data = self.make_request(commits_url, commits_params)
+            if commits_data:
+                # Successfully got commits from this branch
+                total_commits = len(commits_data)
+                
+                # Get last commit date from first commit
+                if commits_data:
+                    last_commit_date = commits_data[0]['commit']['committer']['date']
+                
+                # Continue pagination to get total count
+                page = 2
+                while True:
+                    commits_params['page'] = page
+                    more_commits = self.make_request(commits_url, commits_params)
+                    
+                    if not more_commits or len(more_commits) == 0:
+                        break
+                    
+                    total_commits += len(more_commits)
+                    
+                    # Stop if we got less than full page (last page)
+                    if len(more_commits) < 100:
+                        break
+                    
+                    page += 1
+                    
+                    # Safety limit to avoid infinite loops
+                    if page > 100:  # Max 10,000 commits
+                        break
+                
+                break  # Successfully processed this branch, no need to try others
+        
+        return total_commits, last_commit_date
+    
+    def _get_last_commit_date(self, repo_name: str, default_branch: str) -> Optional[str]:
+        """
+        Get the last commit date with fallback branch handling.
+        
+        Args:
+            repo_name: Repository name
+            default_branch: Default branch name
+            
+        Returns:
+            Last commit date or None
+        """
+        branches_to_try = [default_branch, 'master', 'main', 'develop']
+        if default_branch not in branches_to_try:
+            branches_to_try.insert(0, default_branch)
+        
+        for branch in branches_to_try:
+            commits_url = f"{self.base_url}/repos/{self.org}/{repo_name}/commits"
+            commits_params = {'sha': branch, 'per_page': 1}
+            
+            commits_data = self.make_request(commits_url, commits_params)
+            if commits_data and len(commits_data) > 0:
+                return commits_data[0]['commit']['committer']['date']
+        
+        return None
     
     def get_pr_review_analysis(self, repo_name: str) -> Dict[str, Any]:
         """
