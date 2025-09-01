@@ -1370,18 +1370,23 @@ class GitHubRepoAnalyzer:
             repo_progress.update(1)
             repo_progress.set_postfix({"step": "PR reviews"})
         
+        print(f"🔍 Analyzing PR reviews for {repo_name}...")
         pr_review_analysis = self.get_pr_review_analysis(repo_name)
         repo_data.update(pr_review_analysis)
+        print(f"✅ PR analysis completed: {pr_review_analysis.get('total_analyzed_prs', 0)} PRs processed")
         
         # Step 7: Calculate quality score
         if use_repo_progress:
             repo_progress.update(1)
             repo_progress.set_postfix({"step": "quality score"})
         
+        print(f"📊 Calculating quality score for {repo_name}...")
         quality_analysis = self.calculate_quality_score(repo_data)
         repo_data.update(quality_analysis)
+        print(f"✅ Quality score: {quality_analysis.get('quality_score', 0)}/100")
         
         # Format dates
+        print(f"📅 Formatting dates and finalizing data for {repo_name}...")
         repo_data['created_date'] = datetime.fromisoformat(
             repo['created_at'].replace('Z', '+00:00')
         ).strftime('%Y-%m-%d')
@@ -1397,6 +1402,7 @@ class GitHubRepoAnalyzer:
         if use_repo_progress:
             repo_progress.close()
         
+        print(f"✅ Repository analysis completed for {repo_name}")
         return repo_data
     
     def analyze_repositories(self, repos: List[Dict], show_progress: bool = True, repo_filter: List[str] = None) -> List[Dict[str, Any]]:

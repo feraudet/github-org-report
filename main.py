@@ -17,7 +17,7 @@ import argparse
 import os
 from datetime import datetime
 from analyzer import GitHubRepoAnalyzer
-from output import generate_all_outputs
+import output
 from utils import setup_ssl_warnings, get_env_variables, validate_required_args, should_show_progress
 
 def main():
@@ -49,6 +49,11 @@ Environment Variables:
         '--token',
         type=str,
         help='GitHub Personal Access Token (can also use GITHUB_TOKEN environment variable)'
+    )
+    parser.add_argument(
+        '--output',
+        type=str,
+        help='Base filename for output files (without extension)'
     )
     parser.add_argument(
         '--output-dir',
@@ -208,11 +213,17 @@ Environment Variables:
             print("No repositories found or analyzed.")
             return
         
-        # Generate output files
-        base_filename = f"{org}_repos_{timestamp}"
+        # Save results to files
+        output_filename = args.output or f"github_analysis_{org}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        print(f"💾 Saving results to {output_filename}...")
         
-        # Save to different formats
-        generate_all_outputs(repo_data, base_filename, args.output_dir)
+        if args.analyze_only:
+            # For analyze-only mode, generate HTML dashboard by default
+            output.save_to_html(repo_data, os.path.join(args.output_dir, f"{output_filename}.html"))
+            print(f"🌐 Interactive HTML dashboard created: {output_filename}.html")
+            print("   Open this file in your browser to explore quality configurations!")
+        
+        output.generate_all_outputs(repo_data, output_filename, args.output_dir)
         
         # Print summary
         end_time = datetime.now()
