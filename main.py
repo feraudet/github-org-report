@@ -31,13 +31,15 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 class GitHubRepoAnalyzer:
     """Analyzes GitHub repositories for an organization."""
     
-    def __init__(self, token: str, org: str):
+    def __init__(self, token: str, org: str, api_url: str = 'https://api.github.com', verify_ssl: bool = True):
         """
         Initialize the analyzer with GitHub token and organization name.
         
         Args:
             token: GitHub Personal Access Token
             org: GitHub organization name
+            api_url: GitHub API base URL (default: https://api.github.com)
+            verify_ssl: Whether to verify SSL certificates (default: True)
         """
         self.token = token
         self.org = org
@@ -45,7 +47,8 @@ class GitHubRepoAnalyzer:
             'Authorization': f'token {token}',
             'Accept': 'application/vnd.github.v3+json'
         }
-        self.base_url = 'https://api.github.com'
+        self.base_url = api_url.rstrip('/')
+        self.verify_ssl = verify_ssl
         
         # Code type mappings based on file extensions
         self.code_type_mappings = {
@@ -100,7 +103,7 @@ class GitHubRepoAnalyzer:
             JSON response data or None if request failed
         """
         try:
-            response = requests.get(url, headers=self.headers, params=params)
+            response = requests.get(url, headers=self.headers, params=params, verify=self.verify_ssl)
             response.raise_for_status()
             return response.json()
         except requests.exceptions.RequestException as e:
@@ -194,7 +197,7 @@ class GitHubRepoAnalyzer:
             'q': f'repo:{self.org}/{repo_name} type:pr state:open',
             'per_page': 1
         }
-        open_response = requests.get(search_url, headers=self.headers, params=open_params)
+        open_response = requests.get(search_url, headers=self.headers, params=open_params, verify=self.verify_ssl)
         
         open_count = 0
         if open_response.status_code == 200:
@@ -206,7 +209,7 @@ class GitHubRepoAnalyzer:
             'q': f'repo:{self.org}/{repo_name} type:pr state:closed',
             'per_page': 1
         }
-        closed_response = requests.get(search_url, headers=self.headers, params=closed_params)
+        closed_response = requests.get(search_url, headers=self.headers, params=closed_params, verify=self.verify_ssl)
         
         closed_count = 0
         if closed_response.status_code == 200:
@@ -232,7 +235,7 @@ class GitHubRepoAnalyzer:
             'sha': default_branch,
             'per_page': 100  # Analyze last 100 commits
         }
-        commits_response = requests.get(commits_url, headers=self.headers, params=commits_params)
+        commits_response = requests.get(commits_url, headers=self.headers, params=commits_params, verify=self.verify_ssl)
         
         if commits_response.status_code != 200:
             return 0
@@ -250,7 +253,7 @@ class GitHubRepoAnalyzer:
                 'per_page': 1
             }
             
-            search_response = requests.get(search_url, headers=self.headers, params=search_params)
+            search_response = requests.get(search_url, headers=self.headers, params=search_params, verify=self.verify_ssl)
             if search_response.status_code == 200:
                 search_data = search_response.json()
                 # If no PRs found for this commit, it's likely a direct push
@@ -273,14 +276,14 @@ class GitHubRepoAnalyzer:
         # Get total commit count using a more reliable method
         # First try to get repository statistics
         stats_url = f"{self.base_url}/repos/{self.org}/{repo_name}/stats/participation"
-        stats_response = requests.get(stats_url, headers=self.headers)
+        stats_response = requests.get(stats_url, headers=self.headers, verify=self.verify_ssl)
         
         total_commits = 0
         last_commit_date = None
         
         # Try to get commit count from contributors API (more reliable)
         contributors_url = f"{self.base_url}/repos/{self.org}/{repo_name}/stats/contributors"
-        contributors_response = requests.get(contributors_url, headers=self.headers)
+        contributors_response = requests.get(contributors_url, headers=self.headers, verify=self.verify_ssl)
         
         if contributors_response.status_code == 200:
             contributors_data = contributors_response.json()
@@ -296,7 +299,7 @@ class GitHubRepoAnalyzer:
             
             while True:
                 commits_params['page'] = page
-                commits_response = requests.get(commits_url, headers=self.headers, params=commits_params)
+                commits_response = requests.get(commits_url, headers=self.headers, params=commits_params, verify=self.verify_ssl)
                 
                 if commits_response.status_code != 200:
                     break
@@ -325,7 +328,7 @@ class GitHubRepoAnalyzer:
         if not last_commit_date:
             commits_url = f"{self.base_url}/repos/{self.org}/{repo_name}/commits"
             commits_params = {'sha': default_branch, 'per_page': 1}
-            commits_response = requests.get(commits_url, headers=self.headers, params=commits_params)
+            commits_response = requests.get(commits_url, headers=self.headers, params=commits_params, verify=self.verify_ssl)
             
             if commits_response.status_code == 200:
                 commits_data = commits_response.json()
@@ -563,6 +566,17 @@ def main():
         nargs='+',
         help=f'Filter repositories by programming languages. Supported: {', '.join(supported_langs[:10])}... (e.g., --languages Python JavaScript Java)'
     )
+    parser.add_argument(
+        '--api-url',
+        type=str,
+        default='https://api.github.com',
+        help='GitHub API base URL (default: https://api.github.com, for GitHub Enterprise use: https://your-domain/api/v3)'
+    )
+    parser.add_argument(
+        '--no-ssl-verify',
+        action='store_true',
+        help='Disable SSL certificate verification (useful for self-signed certificates)'
+    )
     
     args = parser.parse_args()
     
@@ -582,7 +596,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Initialize analyzer
-    analyzer = GitHubRepoAnalyzer(token, org)
+    analyzer = GitHubRepoAnalyzer(token, org, api_url=args.api_url, verify_ssl=not args.no_ssl_verify)
     
     # Analyze repositories
     print(f"Starting analysis of repositories for organization: {org}")

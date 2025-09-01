@@ -78,6 +78,8 @@ export GITHUB_ORG="your_organization_name"
 - `--output-dir`: Specify output directory for generated files (default: current directory)
 - `--limit`: Maximum number of repositories to analyze (useful for testing or large organizations)
 - `--languages`: Filter repositories by programming languages (multiple values allowed)
+- `--api-url`: Specify custom GitHub API URL (default: https://api.github.com)
+- `--no-ssl-verify`: Disable SSL certificate verification
 
 #### Supported Languages for Filtering
 
@@ -136,7 +138,30 @@ With filtering and limits:
 
 # Combine filters and limits
 ./main.py --org myorg --token ghp_xxx --limit 5 --languages Java TypeScript
+
+# GitHub Enterprise with custom API URL
+./main.py --org myorg --token ghp_xxx --api-url https://github.company.com/api/v3
+
+# Disable SSL verification (for self-signed certificates)
+./main.py --org myorg --token ghp_xxx --no-ssl-verify
+
+# GitHub Enterprise with SSL disabled
+./main.py --org myorg --token ghp_xxx --api-url https://github.company.com/api/v3 --no-ssl-verify
 ```
+
+### GitHub Enterprise Support
+
+The script supports GitHub Enterprise installations:
+
+**Custom API URL:**
+- Use `--api-url` to specify your GitHub Enterprise API endpoint
+- Format: `https://your-github-enterprise-domain/api/v3`
+- Default: `https://api.github.com` (GitHub.com)
+
+**SSL Certificate Issues:**
+- Use `--no-ssl-verify` to disable SSL certificate verification
+- Useful for self-signed certificates or internal CA certificates
+- **Security Warning**: Only use this option in trusted environments
 
 ## GitHub Personal Access Token (PAT)
 
