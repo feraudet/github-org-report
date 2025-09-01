@@ -28,6 +28,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.worksheet.table import Table, TableStyleInfo
 import urllib3
 import warnings
+from tqdm import tqdm
 
 
 class GitHubRepoAnalyzer:
@@ -220,6 +221,46 @@ class GitHubRepoAnalyzer:
         
         return {'open': open_count, 'closed': closed_count}
     
+    def get_contributors_count(self, repo_name: str) -> int:
+        """
+        Get the number of contributors to the repository.
+        
+        Args:
+            repo_name: Repository name
+            
+        Returns:
+            Number of contributors
+        """
+        contributors_url = f"{self.base_url}/repos/{self.org}/{repo_name}/contributors"
+        contributors_params = {'per_page': 100}
+        page = 1
+        total_contributors = 0
+        
+        while True:
+            contributors_params['page'] = page
+            contributors_response = requests.get(contributors_url, headers=self.headers, params=contributors_params, verify=self.verify_ssl)
+            
+            if contributors_response.status_code != 200:
+                break
+                
+            contributors_data = contributors_response.json()
+            if not contributors_data:
+                break
+                
+            total_contributors += len(contributors_data)
+            
+            # Stop if we got less than full page (last page)
+            if len(contributors_data) < 100:
+                break
+                
+            page += 1
+            
+            # Safety limit
+            if page > 50:  # Max 5,000 contributors
+                break
+        
+        return total_contributors
+    
     def get_direct_pushes_count(self, repo_name: str, default_branch: str) -> int:
         """
         Get count of direct pushes to default branch by analyzing commits without PRs.
@@ -263,6 +304,184 @@ class GitHubRepoAnalyzer:
                     direct_pushes += 1
         
         return direct_pushes
+    
+    def get_pr_review_analysis(self, repo_name: str) -> Dict[str, Any]:
+        """
+        Analyze PR review patterns and quality.
+        
+        Args:
+            repo_name: Repository name
+            
+        Returns:
+            Dictionary with PR review analysis
+        """
+        # Get recent closed PRs for analysis
+        search_url = f"{self.base_url}/search/issues"
+        search_params = {
+            'q': f'repo:{self.org}/{repo_name} type:pr state:closed',
+            'per_page': 100,  # Analyze last 100 closed PRs
+            'sort': 'updated',
+            'order': 'desc'
+        }
+        
+        search_response = requests.get(search_url, headers=self.headers, params=search_params, verify=self.verify_ssl)
+        
+        if search_response.status_code != 200:
+            return {
+                'self_approved_prs': 0,
+                'total_analyzed_prs': 0,
+                'prs_with_description': 0,
+                'prs_reviewed_by_others': 0
+            }
+        
+        search_data = search_response.json()
+        prs = search_data.get('items', [])
+        
+        self_approved_count = 0
+        prs_with_description = 0
+        prs_reviewed_by_others = 0
+        total_analyzed = len(prs)
+        
+        for pr in prs:
+            pr_number = pr['number']
+            pr_author = pr['user']['login']
+            
+            # Check if PR has description
+            if pr.get('body') and len(pr['body'].strip()) > 10:
+                prs_with_description += 1
+            
+            # Get PR reviews
+            reviews_url = f"{self.base_url}/repos/{self.org}/{repo_name}/pulls/{pr_number}/reviews"
+            reviews_response = requests.get(reviews_url, headers=self.headers, verify=self.verify_ssl)
+            
+            if reviews_response.status_code == 200:
+                reviews_data = reviews_response.json()
+                
+                # Check for self-approval
+                approved_by_author = False
+                approved_by_others = False
+                
+                for review in reviews_data:
+                    if review['state'] == 'APPROVED':
+                        if review['user']['login'] == pr_author:
+                            approved_by_author = True
+                        else:
+                            approved_by_others = True
+                
+                if approved_by_author:
+                    self_approved_count += 1
+                
+                if approved_by_others:
+                    prs_reviewed_by_others += 1
+        
+        return {
+            'self_approved_prs': self_approved_count,
+            'total_analyzed_prs': total_analyzed,
+            'prs_with_description': prs_with_description,
+            'prs_reviewed_by_others': prs_reviewed_by_others
+        }
+    
+    def calculate_quality_score(self, repo_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Calculate a quality score (0-100) based on repository practices.
+        
+        Args:
+            repo_data: Repository data dictionary
+            
+        Returns:
+            Dictionary with quality score and justification
+        """
+        score = 0
+        justifications = []
+        
+        # Factor 1: PR Review Quality (40 points max)
+        total_prs = repo_data.get('total_analyzed_prs', 0)
+        if total_prs > 0:
+            prs_reviewed_by_others = repo_data.get('prs_reviewed_by_others', 0)
+            self_approved_prs = repo_data.get('self_approved_prs', 0)
+            
+            # Points for external reviews
+            review_ratio = prs_reviewed_by_others / total_prs
+            review_points = min(25, int(review_ratio * 25))
+            score += review_points
+            
+            if review_ratio >= 0.8:
+                justifications.append(f"Excellent PR review culture ({review_ratio:.1%} reviewed by others)")
+            elif review_ratio >= 0.5:
+                justifications.append(f"Good PR review practices ({review_ratio:.1%} reviewed by others)")
+            else:
+                justifications.append(f"Limited PR reviews ({review_ratio:.1%} reviewed by others)")
+            
+            # Deduct points for self-approvals
+            self_approval_ratio = self_approved_prs / total_prs
+            if self_approval_ratio > 0.2:
+                deduction = min(15, int(self_approval_ratio * 15))
+                score -= deduction
+                justifications.append(f"High self-approval rate ({self_approval_ratio:.1%}) reduces quality")
+            elif self_approval_ratio > 0:
+                justifications.append(f"Some self-approvals detected ({self_approval_ratio:.1%})")
+            else:
+                score += 15
+                justifications.append("No self-approvals detected")
+        else:
+            justifications.append("No PRs available for review analysis")
+        
+        # Factor 2: Direct Push Discipline (25 points max)
+        total_commits = repo_data.get('total_commits', 1)
+        direct_pushes = repo_data.get('direct_pushes_to_default', 0)
+        
+        if total_commits > 0:
+            direct_push_ratio = direct_pushes / total_commits
+            if direct_push_ratio <= 0.1:
+                score += 25
+                justifications.append(f"Excellent branch discipline ({direct_push_ratio:.1%} direct pushes)")
+            elif direct_push_ratio <= 0.3:
+                score += 15
+                justifications.append(f"Good branch discipline ({direct_push_ratio:.1%} direct pushes)")
+            elif direct_push_ratio <= 0.5:
+                score += 5
+                justifications.append(f"Moderate direct push usage ({direct_push_ratio:.1%})")
+            else:
+                justifications.append(f"High direct push rate ({direct_push_ratio:.1%}) bypasses review")
+        
+        # Factor 3: Documentation Quality (20 points max)
+        prs_with_description = repo_data.get('prs_with_description', 0)
+        if total_prs > 0:
+            description_ratio = prs_with_description / total_prs
+            description_points = min(20, int(description_ratio * 20))
+            score += description_points
+            
+            if description_ratio >= 0.8:
+                justifications.append(f"Excellent PR documentation ({description_ratio:.1%} with descriptions)")
+            elif description_ratio >= 0.5:
+                justifications.append(f"Good PR documentation practices ({description_ratio:.1%})")
+            else:
+                justifications.append(f"Limited PR descriptions ({description_ratio:.1%})")
+        
+        # Factor 4: Collaboration (15 points max)
+        contributors_count = repo_data.get('contributors_count', 0)
+        if contributors_count >= 10:
+            score += 15
+            justifications.append(f"High collaboration ({contributors_count} contributors)")
+        elif contributors_count >= 5:
+            score += 10
+            justifications.append(f"Good collaboration ({contributors_count} contributors)")
+        elif contributors_count >= 2:
+            score += 5
+            justifications.append(f"Limited collaboration ({contributors_count} contributors)")
+        else:
+            justifications.append(f"Single contributor repository")
+        
+        # Ensure score is within bounds
+        score = max(0, min(100, score))
+        
+        # Create justification text
+        justification_text = ". ".join(justifications) + "."
+        
+        return {
+            'quality_score': score,
+            'quality_justification': justification_text
+        }
     
     def get_commit_stats(self, repo_name: str, default_branch: str) -> Dict[str, Any]:
         """
@@ -346,20 +565,41 @@ class GitHubRepoAnalyzer:
             'direct_pushes_to_default': direct_pushes
         }
     
-    def analyze_repository(self, repo: Dict) -> Dict[str, Any]:
+    def analyze_repository(self, repo: Dict, show_progress: bool = True) -> Dict[str, Any]:
         """
         Analyze a single repository and collect all required information.
         
         Args:
             repo: Repository dictionary from GitHub API
+            show_progress: Whether to show progress bar for this repository
             
         Returns:
             Dictionary with analyzed repository data
         """
         repo_name = repo['name']
-        print(f"Analyzing repository: {repo_name}")
         
-        # Basic repository information
+        # Define analysis steps
+        analysis_steps = [
+            "Basic info",
+            "Code types", 
+            "Pull requests",
+            "Contributors",
+            "Commit stats",
+            "PR reviews",
+            "Quality score"
+        ]
+        
+        # Create progress bar for this repository if requested
+        if show_progress:
+            repo_progress = tqdm(analysis_steps, desc=f"Analyzing {repo_name[:15]}", leave=False, unit="step")
+        else:
+            repo_progress = analysis_steps
+        
+        # Step 1: Basic repository information
+        if show_progress:
+            next(repo_progress)
+            repo_progress.set_postfix({"step": "basic info"})
+        
         repo_data = {
             'name': repo_name,
             'full_name': repo['full_name'],
@@ -377,20 +617,55 @@ class GitHubRepoAnalyzer:
             'language': repo.get('language', 'Unknown')
         }
         
-        # Detect code types
+        # Step 2: Detect code types
+        if show_progress:
+            next(repo_progress)
+            repo_progress.set_postfix({"step": "code types"})
+        
         code_types = self.detect_code_types(repo_name)
         repo_data['code_types'] = code_types
         repo_data['primary_code_type'] = code_types[0] if code_types else 'Unknown'
         
-        # Get pull request counts
+        # Step 3: Get pull request counts
+        if show_progress:
+            next(repo_progress)
+            repo_progress.set_postfix({"step": "pull requests"})
+        
         pr_counts = self.get_pull_requests_count(repo_name)
         repo_data['open_prs'] = pr_counts['open']
         repo_data['closed_prs'] = pr_counts['closed']
         repo_data['total_prs'] = pr_counts['open'] + pr_counts['closed']
         
-        # Get commit statistics
+        # Step 4: Get contributors count
+        if show_progress:
+            next(repo_progress)
+            repo_progress.set_postfix({"step": "contributors"})
+        
+        repo_data['contributors_count'] = self.get_contributors_count(repo_name)
+        
+        # Step 5: Get commit statistics
+        if show_progress:
+            next(repo_progress)
+            repo_progress.set_postfix({"step": "commit stats"})
+        
         commit_stats = self.get_commit_stats(repo_name, repo['default_branch'])
         repo_data.update(commit_stats)
+        
+        # Step 6: Get PR review analysis
+        if show_progress:
+            next(repo_progress)
+            repo_progress.set_postfix({"step": "PR reviews"})
+        
+        pr_review_analysis = self.get_pr_review_analysis(repo_name)
+        repo_data.update(pr_review_analysis)
+        
+        # Step 7: Calculate quality score
+        if show_progress:
+            next(repo_progress)
+            repo_progress.set_postfix({"step": "quality score"})
+        
+        quality_analysis = self.calculate_quality_score(repo_data)
+        repo_data.update(quality_analysis)
         
         # Format dates
         repo_data['created_date'] = datetime.fromisoformat(
@@ -406,13 +681,14 @@ class GitHubRepoAnalyzer:
         
         return repo_data
     
-    def analyze_all_repositories(self, limit: Optional[int] = None, languages: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def analyze_all_repositories(self, limit: Optional[int] = None, languages: Optional[List[str]] = None, show_progress: bool = True) -> List[Dict[str, Any]]:
         """
         Analyze all repositories in the organization.
         
         Args:
             limit: Maximum number of repositories to analyze
             languages: List of languages to filter repositories by
+            show_progress: Whether to show progress bar
         
         Returns:
             List of analyzed repository data
@@ -436,13 +712,26 @@ class GitHubRepoAnalyzer:
         
         analyzed_repos = []
         
-        for i, repo in enumerate(repos, 1):
-            print(f"Processing repository {i}/{len(repos)}: {repo['name']}")
+        # Create progress bar if requested and in terminal
+        if show_progress:
+            progress_bar = tqdm(repos, desc="Analyzing repositories", unit="repo")
+        else:
+            progress_bar = repos
+        
+        for repo in progress_bar:
+            if show_progress:
+                progress_bar.set_postfix({"current": repo['name'][:20]})
+            else:
+                print(f"Processing repository: {repo['name']}")
+            
             try:
-                repo_data = self.analyze_repository(repo)
+                repo_data = self.analyze_repository(repo, show_progress=show_progress)
                 analyzed_repos.append(repo_data)
             except Exception as e:
-                print(f"Error analyzing repository {repo['name']}: {e}")
+                if show_progress:
+                    tqdm.write(f"Error analyzing repository {repo['name']}: {e}")
+                else:
+                    print(f"Error analyzing repository {repo['name']}: {e}")
                 continue
         
         return analyzed_repos
@@ -496,10 +785,20 @@ class GitHubRepoAnalyzer:
         for r in dataframe_to_rows(df, index=False, header=True):
             ws.append(r)
         
-        # Create table with filters
+        # Create table with filters - handle large column counts
+        num_cols = len(df.columns)
+        if num_cols <= 26:
+            # Single letter columns (A-Z)
+            end_col = chr(64 + num_cols)
+        else:
+            # Double letter columns (AA, AB, etc.)
+            first_letter = chr(64 + ((num_cols - 1) // 26))
+            second_letter = chr(65 + ((num_cols - 1) % 26))
+            end_col = first_letter + second_letter
+        
         table = Table(
             displayName="RepoTable",
-            ref=f"A1:{chr(64 + len(df.columns))}{len(df) + 1}"
+            ref=f"A1:{end_col}{len(df) + 1}"
         )
         
         # Add table style
@@ -579,6 +878,11 @@ def main():
         action='store_true',
         help='Disable SSL certificate verification (useful for self-signed certificates)'
     )
+    parser.add_argument(
+        '--no-progress',
+        action='store_true',
+        help='Disable progress bar (useful for non-terminal environments)'
+    )
     
     args = parser.parse_args()
     
@@ -613,7 +917,10 @@ def main():
     start_time = datetime.now()
     
     try:
-        repo_data = analyzer.analyze_all_repositories(limit=args.limit, languages=args.languages)
+        # Detect if running in a terminal
+        show_progress = sys.stdout.isatty() and not args.no_progress
+        
+        repo_data = analyzer.analyze_all_repositories(limit=args.limit, languages=args.languages, show_progress=show_progress)
         
         if not repo_data:
             print("No repositories found or analyzed.")

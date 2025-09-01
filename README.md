@@ -208,11 +208,26 @@ The script generates three files with timestamps:
 | `watchers_count` | Integer | Number of watchers |
 | `open_issues_count` | Integer | Number of open issues |
 | `size` | Integer | Repository size in KB |
+| `contributors_count` | Integer | Total number of contributors to the repository |
+| `self_approved_prs` | Integer | Number of PRs approved by their own creator |
+| `total_analyzed_prs` | Integer | Number of recent PRs analyzed for quality metrics |
+| `prs_with_description` | Integer | Number of PRs with meaningful descriptions |
+| `prs_reviewed_by_others` | Integer | Number of PRs reviewed by someone other than the author |
+| `quality_score` | Integer | Quality score from 0-100 based on development practices |
+| `quality_justification` | String | English explanation of the quality score |
 | `private` | Boolean | Whether repository is private |
 | `archived` | Boolean | Whether repository is archived |
 | `disabled` | Boolean | Whether repository is disabled |
 
 **Note on Direct Pushes**: The `direct_pushes_to_default` field analyzes the last 100 commits on the default branch and counts those not associated with any pull request. This provides an indication of commits pushed directly to the main branch without going through the PR process.
+
+**Quality Score Calculation**: The `quality_score` (0-100) is calculated based on:
+- **PR Review Quality (40 pts)**: Percentage of PRs reviewed by others, penalties for self-approvals
+- **Branch Discipline (25 pts)**: Low ratio of direct pushes to total commits
+- **Documentation (20 pts)**: Percentage of PRs with meaningful descriptions
+- **Collaboration (15 pts)**: Number of contributors to the repository
+
+The `quality_justification` field provides a detailed English explanation of how the score was calculated.
 
 ## Code Type Detection
 
