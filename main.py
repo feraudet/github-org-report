@@ -109,6 +109,13 @@ class GitHubRepoAnalyzer:
             response = requests.get(url, headers=self.headers, params=params, verify=self.verify_ssl)
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError as e:
+            if response.status_code == 404:
+                # Silent handling of 404 errors (empty repos, private repos, etc.)
+                return None
+            else:
+                print(f"HTTP Error making request to {url}: {e}")
+                return None
         except requests.exceptions.RequestException as e:
             print(f"Error making request to {url}: {e}")
             return None
@@ -166,6 +173,8 @@ class GitHubRepoAnalyzer:
         data = self.make_request(url)
         
         if not data:
+            # If contents API fails (404, empty repo, etc.), return empty list
+            # This can happen with empty repositories, private repos without access, or archived repos
             return []
         
         extensions = set()
@@ -565,6 +574,68 @@ class GitHubRepoAnalyzer:
             'direct_pushes_to_default': direct_pushes
         }
     
+    def analyze_repositories(self, repos: List[Dict], show_progress: bool = True, repo_filter: List[str] = None) -> List[Dict[str, Any]]:
+        """
+        Analyze multiple repositories.
+        
+        Args:
+            repos: List of repository dictionaries from GitHub API
+            show_progress: Whether to show progress bar
+            repo_filter: List of specific repository names to analyze (None = analyze all)
+            
+        Returns:
+            List of analyzed repository data
+        """
+        analyzed_repos = []
+        
+        # Filter repositories if specific repos are requested
+        if repo_filter:
+            # Convert filter to lowercase for case-insensitive matching
+            repo_filter_lower = [name.lower() for name in repo_filter]
+            filtered_repos = [repo for repo in repos if repo['name'].lower() in repo_filter_lower]
+            
+            # Report filtering results
+            if show_progress:
+                print(f"Filtered {len(repos)} repositories to {len(filtered_repos)} based on --repos filter")
+                if len(filtered_repos) < len(repo_filter):
+                    found_names = {repo['name'].lower() for repo in filtered_repos}
+                    missing = [name for name in repo_filter if name.lower() not in found_names]
+                    print(f"Warning: Repository names not found: {', '.join(missing)}")
+            repos = filtered_repos
+        
+        # Create progress bar for overall progress
+        if show_progress and sys.stdout.isatty():
+            use_progress = True
+        else:
+            use_progress = False
+        
+        if use_progress:
+            progress_bar = tqdm(total=len(repos), desc="Analyzing repositories", unit="repo")
+        
+        for i, repo in enumerate(repos):
+            if use_progress:
+                progress_bar.set_postfix({"current": repo['name'][:20]})
+            else:
+                print(f"Processing repository: {repo['name']}")
+            
+            try:
+                repo_data = self.analyze_repository(repo, show_progress=show_progress)
+                analyzed_repos.append(repo_data)
+            except Exception as e:
+                if use_progress:
+                    tqdm.write(f"Error analyzing repository {repo['name']}: {e}")
+                else:
+                    print(f"Error analyzing repository {repo['name']}: {e}")
+                continue
+            finally:
+                if use_progress:
+                    progress_bar.update(1)
+        
+        if use_progress:
+            progress_bar.close()
+        
+        return analyzed_repos
+    
     def analyze_repository(self, repo: Dict, show_progress: bool = True) -> Dict[str, Any]:
         """
         Analyze a single repository and collect all required information.
@@ -590,14 +661,15 @@ class GitHubRepoAnalyzer:
         ]
         
         # Create progress bar for this repository if requested
-        if show_progress:
-            repo_progress = tqdm(analysis_steps, desc=f"Analyzing {repo_name[:15]}", leave=False, unit="step")
+        if show_progress and sys.stdout.isatty():
+            repo_progress = tqdm(total=len(analysis_steps), desc=f"Analyzing {repo_name[:15]}", leave=False, unit="step")
+            use_repo_progress = True
         else:
-            repo_progress = analysis_steps
+            use_repo_progress = False
         
         # Step 1: Basic repository information
-        if show_progress:
-            next(repo_progress)
+        if use_repo_progress:
+            repo_progress.update(1)
             repo_progress.set_postfix({"step": "basic info"})
         
         repo_data = {
@@ -618,8 +690,8 @@ class GitHubRepoAnalyzer:
         }
         
         # Step 2: Detect code types
-        if show_progress:
-            next(repo_progress)
+        if use_repo_progress:
+            repo_progress.update(1)
             repo_progress.set_postfix({"step": "code types"})
         
         code_types = self.detect_code_types(repo_name)
@@ -627,8 +699,8 @@ class GitHubRepoAnalyzer:
         repo_data['primary_code_type'] = code_types[0] if code_types else 'Unknown'
         
         # Step 3: Get pull request counts
-        if show_progress:
-            next(repo_progress)
+        if use_repo_progress:
+            repo_progress.update(1)
             repo_progress.set_postfix({"step": "pull requests"})
         
         pr_counts = self.get_pull_requests_count(repo_name)
@@ -637,31 +709,31 @@ class GitHubRepoAnalyzer:
         repo_data['total_prs'] = pr_counts['open'] + pr_counts['closed']
         
         # Step 4: Get contributors count
-        if show_progress:
-            next(repo_progress)
+        if use_repo_progress:
+            repo_progress.update(1)
             repo_progress.set_postfix({"step": "contributors"})
         
         repo_data['contributors_count'] = self.get_contributors_count(repo_name)
         
         # Step 5: Get commit statistics
-        if show_progress:
-            next(repo_progress)
+        if use_repo_progress:
+            repo_progress.update(1)
             repo_progress.set_postfix({"step": "commit stats"})
         
         commit_stats = self.get_commit_stats(repo_name, repo['default_branch'])
         repo_data.update(commit_stats)
         
         # Step 6: Get PR review analysis
-        if show_progress:
-            next(repo_progress)
+        if use_repo_progress:
+            repo_progress.update(1)
             repo_progress.set_postfix({"step": "PR reviews"})
         
         pr_review_analysis = self.get_pr_review_analysis(repo_name)
         repo_data.update(pr_review_analysis)
         
         # Step 7: Calculate quality score
-        if show_progress:
-            next(repo_progress)
+        if use_repo_progress:
+            repo_progress.update(1)
             repo_progress.set_postfix({"step": "quality score"})
         
         quality_analysis = self.calculate_quality_score(repo_data)
@@ -677,7 +749,11 @@ class GitHubRepoAnalyzer:
                 repo_data['last_commit_date'].replace('Z', '+00:00')
             ).strftime('%Y-%m-%d')
         else:
-            repo_data['last_commit_date_formatted'] = 'N/A'
+            repo_data['last_commit_date_formatted'] = 'Never'
+        
+        # Close repository progress bar
+        if use_repo_progress:
+            repo_progress.close()
         
         return repo_data
     
@@ -697,13 +773,20 @@ class GitHubRepoAnalyzer:
         
         # Filter by languages if specified
         if languages:
+            # Convert to lowercase for case-insensitive comparison
+            target_languages = [lang.lower() for lang in languages]
             filtered_repos = []
+            
             for repo in repos:
-                repo_language = repo.get('language', '').lower()
-                if repo_language and any(lang.lower() in repo_language for lang in languages):
+                repo_languages = analyzer.detect_code_types(repo['name'])
+                repo_languages_lower = [lang.lower() for lang in repo_languages]
+                
+                # Check if any of the repo's languages match the target languages
+                if any(lang in repo_languages_lower for lang in target_languages):
                     filtered_repos.append(repo)
+            
+            print(f"Filtered {len(repos)} repositories to {len(filtered_repos)} based on language filter: {', '.join(languages)}")
             repos = filtered_repos
-            print(f"Filtered to {len(repos)} repositories matching languages: {', '.join(languages)}")
         
         # Limit number of repositories if specified
         if limit and limit < len(repos):
@@ -868,6 +951,11 @@ def main():
         help=f'Filter repositories by programming languages. Supported: {', '.join(supported_langs[:10])}... (e.g., --languages Python JavaScript Java)'
     )
     parser.add_argument(
+        '--repos',
+        nargs='+',
+        help='Filter specific repositories to analyze by name (e.g., --repos repo1 repo2 repo3)'
+    )
+    parser.add_argument(
         '--api-url',
         type=str,
         default='https://api.github.com',
@@ -920,7 +1008,33 @@ def main():
         # Detect if running in a terminal
         show_progress = sys.stdout.isatty() and not args.no_progress
         
-        repo_data = analyzer.analyze_all_repositories(limit=args.limit, languages=args.languages, show_progress=show_progress)
+        # Get all repositories first
+        repos = analyzer.get_all_repos()
+        
+        # Filter by languages if specified
+        if args.languages:
+            # Convert to lowercase for case-insensitive comparison
+            target_languages = [lang.lower() for lang in args.languages]
+            filtered_repos = []
+            
+            for repo in repos:
+                repo_languages = analyzer.detect_code_types(repo['name'])
+                repo_languages_lower = [lang.lower() for lang in repo_languages]
+                
+                # Check if any of the repo's languages match the target languages
+                if any(lang in repo_languages_lower for lang in target_languages):
+                    filtered_repos.append(repo)
+            
+            print(f"Filtered {len(repos)} repositories to {len(filtered_repos)} based on language filter: {', '.join(args.languages)}")
+            repos = filtered_repos
+        
+        # Limit number of repositories if specified
+        if args.limit and args.limit < len(repos):
+            repos = repos[:args.limit]
+            print(f"Limited analysis to first {args.limit} repositories")
+        
+        # Analyze repositories
+        repo_data = analyzer.analyze_repositories(repos, show_progress=show_progress, repo_filter=args.repos)
         
         if not repo_data:
             print("No repositories found or analyzed.")
