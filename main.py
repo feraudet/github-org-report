@@ -27,6 +27,7 @@ from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.worksheet.table import Table, TableStyleInfo
 import urllib3
+import warnings
 
 
 class GitHubRepoAnalyzer:
@@ -599,6 +600,10 @@ def main():
     # Suppress SSL warnings if SSL verification is disabled
     if args.no_ssl_verify:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        # Also suppress requests warnings
+        requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
+        # Suppress all SSL-related warnings
+        warnings.filterwarnings('ignore', message='Unverified HTTPS request')
     
     # Initialize analyzer
     analyzer = GitHubRepoAnalyzer(token, org, api_url=args.api_url, verify_ssl=not args.no_ssl_verify)
