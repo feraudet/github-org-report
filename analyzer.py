@@ -6,17 +6,19 @@ Contains the main GitHubRepoAnalyzer class for analyzing GitHub repositories.
 """
 
 import sys
-import time
-from datetime import datetime
-from typing import Dict, List, Optional, Any
 import requests
+import json
+import time
+import os
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional
 from tqdm import tqdm
 
 
 class GitHubRepoAnalyzer:
     """Analyzes GitHub repositories for an organization."""
     
-    def __init__(self, token: str, org: str, api_url: str = 'https://api.github.com', verify_ssl: bool = True):
+    def __init__(self, token: str, org: str, api_url: str = 'https://api.github.com', verify_ssl: bool = True, config_path: str = 'quality_config.json'):
         """
         Initialize the analyzer with GitHub token and organization name.
         
@@ -25,16 +27,17 @@ class GitHubRepoAnalyzer:
             org: GitHub organization name
             api_url: GitHub API base URL (default: https://api.github.com)
             verify_ssl: Whether to verify SSL certificates (default: True)
+            config_path: Path to quality scoring configuration file
         """
         self.token = token
         self.org = org
         self.headers = {
             'Authorization': f'token {token}',
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'GitHub-Repo-Analyzer'
+            'Accept': 'application/vnd.github.v3+json'
         }
         self.base_url = api_url
         self.verify_ssl = verify_ssl
+        self.quality_config = self._load_quality_config(config_path)
         
         # Code type mappings
         self.code_type_mappings = {
@@ -130,6 +133,44 @@ class GitHubRepoAnalyzer:
             '.f95': 'Fortran',
             '.f03': 'Fortran',
             '.f08': 'Fortran'
+        }
+    
+    def _load_quality_config(self, config_path: str) -> Dict[str, Any]:
+        """
+        Load quality scoring configuration from JSON file.
+        
+        Args:
+            config_path: Path to configuration file
+            
+        Returns:
+            Configuration dictionary
+        """
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    return config.get('quality_scoring', {})
+            else:
+                print(f"⚠️  Quality config file not found: {config_path}, using defaults")
+                return self._get_default_quality_config()
+        except Exception as e:
+            print(f"⚠️  Error loading quality config: {e}, using defaults")
+            return self._get_default_quality_config()
+    
+    def _get_default_quality_config(self) -> Dict[str, Any]:
+        """Get default quality scoring configuration."""
+        return {
+            "base_score": 100,
+            "penalties": {
+                "no_prs": {"penalty_percent": 50, "message": "No pull requests found"},
+                "no_pr_descriptions": {"penalty_percent": 10, "threshold": 0.5, "message": "Poor PR documentation"},
+                "high_self_approval": {"penalty_percent": 25, "threshold": 0.5, "message": "High self-approval rate"},
+                "low_external_review": {"penalty_percent": 15, "threshold": 0.3, "message": "Insufficient external review"},
+                "high_direct_pushes": {"penalty_percent": 20, "threshold": 0.5, "message": "Poor branch discipline"},
+                "single_contributor": {"penalty_percent": 10, "message": "Single contributor"},
+                "inactive_repository": {"penalty_percent": 5, "days_threshold": 365, "message": "Repository inactive"},
+                "no_commits": {"penalty_percent": 10, "message": "No commits found"}
+            }
         }
     
     def get_supported_languages(self) -> List[str]:
@@ -736,6 +777,8 @@ class GitHubRepoAnalyzer:
         total_lines_added = 0
         total_lines_deleted = 0
         merged_count = 0
+        large_prs_count = 0
+        slow_reviews_count = 0
         
         print(f"📊 Analyzing {len(prs)} PRs in detail...")
         
@@ -786,9 +829,33 @@ class GitHubRepoAnalyzer:
                 total_comments += pr_details.get('comments', 0) + pr_details.get('review_comments', 0)
                 
                 # Count files and lines changed
-                total_files_changed += pr_details.get('changed_files', 0)
+                files_changed = pr_details.get('changed_files', 0)
+                total_files_changed += files_changed
                 total_lines_added += pr_details.get('additions', 0)
                 total_lines_deleted += pr_details.get('deletions', 0)
+                
+                # Check for large PRs (more than 15 files changed)
+                if files_changed > 15:
+                    large_prs_count += 1
+                
+                # Check for slow review response (more than 7 days to first review)
+                if pr.get('created_at'):
+                    try:
+                        created_at = datetime.fromisoformat(pr['created_at'].replace('Z', '+00:00'))
+                        # Get reviews for this PR
+                        reviews_url = f"{self.base_url}/repos/{self.org}/{repo_name}/pulls/{pr_number}/reviews"
+                        reviews_response = self.make_request(reviews_url)
+                        if reviews_response and reviews_response.get('data'):
+                            reviews = reviews_response['data']
+                            if reviews:
+                                first_review = min(reviews, key=lambda r: r['submitted_at'])
+                                first_review_date = datetime.fromisoformat(first_review['submitted_at'].replace('Z', '+00:00'))
+                                days_to_review = (first_review_date - created_at).days
+                                if days_to_review > 7:
+                                    slow_reviews_count += 1
+                    except Exception:
+                        # Skip if we can't parse dates or get reviews
+                        pass
             
             # Analyze reviews
             review_analysis = self._analyze_pr_reviews(repo_name, pr_number, pr_author)
@@ -811,6 +878,10 @@ class GitHubRepoAnalyzer:
         
         if merged_count > 0:
             analysis['avg_time_to_merge_hours'] = round(total_merge_time / merged_count, 1)
+        
+        # Add new metrics to analysis
+        analysis['large_prs_count'] = large_prs_count
+        analysis['slow_reviews_count'] = slow_reviews_count
         
         print(f"✅ PR analysis completed: {analysis['total_analyzed_prs']} PRs processed")
         return analysis
@@ -867,8 +938,7 @@ class GitHubRepoAnalyzer:
     
     def calculate_quality_score(self, repo_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Calculate a quality score for the repository based on various metrics.
-{{ ... }}
+        Calculate a quality score for the repository based on configuration rules.
         
         Args:
             repo_data: Repository data dictionary
@@ -876,85 +946,150 @@ class GitHubRepoAnalyzer:
         Returns:
             Dictionary with quality score and justification
         """
-        score = 100  # Start with perfect score
+        config = self.quality_config
+        score = config.get('base_score', 100)
         justifications = []
+        penalties = config.get('penalties', {})
         
-        # PR Review Quality (30 points max)
+        # Check for no PRs (major penalty)
         total_prs = repo_data.get('total_analyzed_prs', 0)
-        if total_prs > 0:
+        if total_prs == 0:
+            no_prs_config = penalties.get('no_prs', {})
+            penalty = no_prs_config.get('penalty_percent', 50)
+            score -= penalty
+            message = no_prs_config.get('message', 'No pull requests found')
+            justifications.append(f"{message} - reduces score by {penalty} points")
+        else:
+            # PR Review Quality Analysis
             self_approved = repo_data.get('self_approved_prs', 0)
             reviewed_by_others = repo_data.get('prs_reviewed_by_others', 0)
+            prs_with_desc = repo_data.get('prs_with_description', 0)
             
             self_approval_ratio = self_approved / total_prs
             external_review_ratio = reviewed_by_others / total_prs
+            description_ratio = prs_with_desc / total_prs
             
-            if self_approval_ratio > 0.5:
-                penalty = min(25, int(self_approval_ratio * 30))
+            # High self-approval penalty
+            self_approval_config = penalties.get('high_self_approval', {})
+            threshold = self_approval_config.get('threshold', 0.5)
+            if self_approval_ratio > threshold:
+                penalty = min(self_approval_config.get('penalty_percent', 25), 
+                            int(self_approval_ratio * 30))
                 score -= penalty
-                justifications.append(f"High self-approval rate ({self_approval_ratio:.1%}) reduces score by {penalty} points")
+                message = self_approval_config.get('message', 'High self-approval rate')
+                justifications.append(f"{message} ({self_approval_ratio:.1%}) reduces score by {penalty} points")
             
-            if external_review_ratio > 0.7:
-                bonus = min(10, int(external_review_ratio * 15))
+            # Low external review penalty
+            ext_review_config = penalties.get('low_external_review', {})
+            threshold = ext_review_config.get('threshold', 0.3)
+            if external_review_ratio < threshold:
+                penalty = min(ext_review_config.get('penalty_percent', 15), 
+                            int((threshold - external_review_ratio) * 50))
+                score -= penalty
+                message = ext_review_config.get('message', 'Insufficient external review')
+                justifications.append(f"{message} ({external_review_ratio:.1%}) reduces score by {penalty} points")
+            elif external_review_ratio > 0.7:
                 justifications.append(f"Good external review rate ({external_review_ratio:.1%}) maintains high score")
-            elif external_review_ratio < 0.3:
-                penalty = min(15, int((0.3 - external_review_ratio) * 50))
+            
+            # Poor PR descriptions penalty
+            desc_config = penalties.get('no_pr_descriptions', {})
+            threshold = desc_config.get('threshold', 0.5)
+            if description_ratio < threshold:
+                penalty = min(desc_config.get('penalty_percent', 10), 
+                            int((threshold - description_ratio) * 20))
                 score -= penalty
-                justifications.append(f"Low external review rate ({external_review_ratio:.1%}) reduces score by {penalty} points")
-        else:
-            justifications.append("No PRs to analyze for review quality")
+                message = desc_config.get('message', 'Poor PR documentation')
+                justifications.append(f"{message} ({description_ratio:.1%} with descriptions) reduces score by {penalty} points")
+            else:
+                justifications.append(f"Good documentation with {description_ratio:.1%} of PRs having descriptions")
         
-        # Branch Discipline (25 points max)
+        # Branch Discipline
         total_commits = repo_data.get('total_commits', 0)
         direct_pushes = repo_data.get('direct_pushes_to_default', 0)
         
         if total_commits > 0:
             direct_push_ratio = direct_pushes / total_commits
-            if direct_push_ratio > 0.5:
-                penalty = min(20, int(direct_push_ratio * 25))
+            direct_push_config = penalties.get('high_direct_pushes', {})
+            threshold = direct_push_config.get('threshold', 0.5)
+            
+            if direct_push_ratio > threshold:
+                penalty = min(direct_push_config.get('penalty_percent', 20), 
+                            int(direct_push_ratio * 25))
                 score -= penalty
-                justifications.append(f"High direct push ratio ({direct_push_ratio:.1%}) reduces score by {penalty} points")
+                message = direct_push_config.get('message', 'Poor branch discipline')
+                justifications.append(f"{message} ({direct_push_ratio:.1%}) reduces score by {penalty} points")
             elif direct_push_ratio < 0.2:
                 justifications.append(f"Good branch discipline with low direct push ratio ({direct_push_ratio:.1%})")
         
-        # Documentation Quality (20 points max)
-        if total_prs > 0:
-            prs_with_desc = repo_data.get('prs_with_description', 0)
-            description_ratio = prs_with_desc / total_prs
-            
-            if description_ratio < 0.5:
-                penalty = min(15, int((0.5 - description_ratio) * 30))
-                score -= penalty
-                justifications.append(f"Low PR description rate ({description_ratio:.1%}) reduces score by {penalty} points")
-            else:
-                justifications.append(f"Good documentation with {description_ratio:.1%} of PRs having descriptions")
-        
-        # Collaboration Level (15 points max)
+        # Collaboration Level
         contributors = repo_data.get('contributors_count', 0)
+        single_contrib_config = penalties.get('single_contributor', {})
+        
         if contributors == 1:
-            score -= 10
-            justifications.append("Single contributor reduces collaboration score by 10 points")
+            penalty = single_contrib_config.get('penalty_percent', 10)
+            score -= penalty
+            message = single_contrib_config.get('message', 'Single contributor')
+            justifications.append(f"{message} reduces collaboration score by {penalty} points")
         elif contributors >= 5:
             justifications.append(f"Good collaboration with {contributors} contributors")
         elif contributors >= 3:
             justifications.append(f"Moderate collaboration with {contributors} contributors")
         
-        # Activity Level (10 points max)
+        # Activity Level
+        no_commits_config = penalties.get('no_commits', {})
+        inactive_config = penalties.get('inactive_repository', {})
+        
         if repo_data.get('total_commits', 0) == 0:
-            score -= 10
-            justifications.append("No commits found reduces score by 10 points")
+            penalty = no_commits_config.get('penalty_percent', 10)
+            score -= penalty
+            message = no_commits_config.get('message', 'No commits found')
+            justifications.append(f"{message} reduces score by {penalty} points")
         elif repo_data.get('last_commit_date'):
-            # Check if last commit is recent (within 6 months)
+            # Check if last commit is recent
             try:
                 last_commit = datetime.fromisoformat(repo_data['last_commit_date'].replace('Z', '+00:00'))
                 days_since_last_commit = (datetime.now(last_commit.tzinfo) - last_commit).days
+                days_threshold = inactive_config.get('days_threshold', 365)
                 
-                if days_since_last_commit > 365:
-                    score -= 5
-                    justifications.append(f"Last commit was {days_since_last_commit} days ago, reducing score by 5 points")
+                if days_since_last_commit > days_threshold:
+                    penalty = inactive_config.get('penalty_percent', 5)
+                    score -= penalty
+                    message = inactive_config.get('message', 'Repository inactive')
+                    justifications.append(f"{message} ({days_since_last_commit} days ago) reduces score by {penalty} points")
                 elif days_since_last_commit <= 30:
                     justifications.append("Recent activity maintains score")
             except:
                 pass
+        
+        # New metrics: Large PRs penalty
+        if total_prs > 0:
+            large_prs_config = penalties.get('large_prs', {})
+            files_threshold = large_prs_config.get('files_threshold', 15)
+            large_prs_count = repo_data.get('large_prs_count', 0)
+            
+            if large_prs_count > 0:
+                large_prs_ratio = large_prs_count / total_prs
+                if large_prs_ratio > 0.3:  # More than 30% of PRs are large
+                    penalty = min(large_prs_config.get('penalty_percent', 5), 
+                                int(large_prs_ratio * 10))
+                    score -= penalty
+                    message = large_prs_config.get('message', 'Large PRs detected')
+                    justifications.append(f"{message} ({large_prs_count}/{total_prs} PRs) reduces score by {penalty} points")
+        
+        # New metrics: Slow review response penalty
+        if total_prs > 0:
+            slow_review_config = penalties.get('slow_review_response', {})
+            days_threshold = slow_review_config.get('days_threshold', 7)
+            slow_reviews_count = repo_data.get('slow_reviews_count', 0)
+            
+            if slow_reviews_count > 0:
+                slow_reviews_ratio = slow_reviews_count / total_prs
+                if slow_reviews_ratio > 0.4:  # More than 40% of PRs have slow reviews
+                    penalty = min(slow_review_config.get('penalty_percent', 5), 
+                                int(slow_reviews_ratio * 8))
+                    score -= penalty
+                    message = slow_review_config.get('message', 'Slow review response')
+                    justifications.append(f"{message} ({slow_reviews_count}/{total_prs} PRs) reduces score by {penalty} points")
         
         # Ensure score doesn't go below 0
         score = max(0, score)
@@ -969,6 +1104,179 @@ class GitHubRepoAnalyzer:
             'quality_score': score,
             'quality_justification': justification
         }
+    
+    def fetch_repositories_data(self, repos: List[Dict[str, Any]], show_progress: bool = True, repo_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        Fetch raw data from GitHub API without performing quality analysis.
+        Used for --fetch-only mode to cache data for later analysis.
+        """
+        if repo_filter:
+            repos = [repo for repo in repos if repo['name'] in repo_filter]
+        
+        repo_data = []
+        
+        if show_progress:
+            repos = tqdm(repos, desc="Fetching repository data")
+        
+        for repo in repos:
+            try:
+                # Fetch basic repository info
+                basic_info = {
+                    'name': repo['name'],
+                    'org': self.org,
+                    'full_name': repo['full_name'],
+                    'description': repo.get('description', ''),
+                    'language': repo.get('language'),
+                    'created_at': repo.get('created_at'),
+                    'updated_at': repo.get('updated_at'),
+                    'size': repo.get('size', 0),
+                    'stargazers_count': repo.get('stargazers_count', 0),
+                    'watchers_count': repo.get('watchers_count', 0),
+                    'forks_count': repo.get('forks_count', 0),
+                    'open_issues_count': repo.get('open_issues_count', 0),
+                    'private': repo.get('private', False),
+                    'archived': repo.get('archived', False),
+                    'disabled': repo.get('disabled', False),
+                    'default_branch': repo.get('default_branch', 'main')
+                }
+                
+                # Fetch PR analysis data
+                pr_analysis = self.get_pr_review_analysis(repo['name'])
+                
+                # Fetch commit statistics
+                commit_stats = self.get_commit_stats(repo['name'], repo.get('default_branch', 'main'))
+                
+                # Fetch contributors
+                contributors_count = self.get_contributors_count(repo['name'])
+                
+                # Fetch direct pushes count
+                direct_pushes = self.get_direct_pushes_count(repo['name'], repo.get('default_branch', 'main'))
+                
+                # Combine all data
+                repo_info = {
+                    **basic_info,
+                    **pr_analysis,
+                    **commit_stats,
+                    'contributors_count': contributors_count,
+                    'direct_pushes_to_default': direct_pushes,
+                    'fetch_timestamp': datetime.now().isoformat()
+                }
+                
+                repo_data.append(repo_info)
+                
+            except Exception as e:
+                print(f"Error fetching data for {repo['name']}: {str(e)}")
+                continue
+        
+        return repo_data
+        
+    def analyze_repositories(self, repos: List[Dict[str, Any]], show_progress: bool = True, repo_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        Analyze repositories with quality scoring. Can work with fresh GitHub data or cached data.
+        """
+        # If repos is cached data (contains quality scores), re-analyze with current config
+        if repos and isinstance(repos[0], dict) and 'fetch_timestamp' in repos[0]:
+            return self._reanalyze_cached_data(repos, show_progress, repo_filter)
+        
+        # Otherwise, fetch fresh data and analyze
+        return self._analyze_fresh_repos(repos, show_progress, repo_filter)
+    
+    def _analyze_fresh_repos(self, repos: List[Dict[str, Any]], show_progress: bool = True, repo_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Analyze fresh repositories from GitHub API with quality scoring."""
+        if repo_filter:
+            repos = [repo for repo in repos if repo['name'] in repo_filter]
+        
+        repo_data = []
+        
+        if show_progress:
+            repos = tqdm(repos, desc="Analyzing repositories")
+        
+        for repo in repos:
+            try:
+                repo_info = self.analyze_repository(repo, show_progress=False)
+                repo_data.append(repo_info)
+                
+            except Exception as e:
+                print(f"Error analyzing {repo['name']}: {str(e)}")
+                continue
+        
+        return repo_data
+    
+    def _reanalyze_cached_data(self, cached_repos: List[Dict[str, Any]], show_progress: bool = True, repo_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Re-analyze cached repository data with current quality configuration."""
+        if repo_filter:
+            cached_repos = [repo for repo in cached_repos if repo['name'] in repo_filter]
+        
+        repo_data = []
+        
+        if show_progress:
+            cached_repos = tqdm(cached_repos, desc="Re-analyzing cached data")
+        
+        for repo in cached_repos:
+            try:
+                # Calculate quality score with current config
+                quality_data = self.calculate_quality_score(repo)
+                
+                # Update repo data with new quality score
+                repo_info = {**repo, **quality_data}
+                repo_data.append(repo_info)
+                
+            except Exception as e:
+                print(f"Error re-analyzing {repo.get('name', 'unknown')}: {str(e)}")
+                continue
+        
+        return repo_data
+    
+    def save_cached_data(self, repo_data: List[Dict[str, Any]], cache_file: str) -> None:
+        """Save repository data to a JSON cache file."""
+        try:
+            cache_data = {
+                'metadata': {
+                    'org': self.org,
+                    'fetch_timestamp': datetime.now().isoformat(),
+                    'total_repos': len(repo_data),
+                    'analyzer_version': '2.0'
+                },
+                'repositories': repo_data
+            }
+            
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, indent=2, ensure_ascii=False)
+                
+        except Exception as e:
+            print(f"Error saving cache file {cache_file}: {str(e)}")
+            raise
+    
+    def load_cached_data(self, cache_file: str) -> List[Dict[str, Any]]:
+        """Load repository data from a JSON cache file."""
+        try:
+            if not os.path.exists(cache_file):
+                print(f"Cache file not found: {cache_file}")
+                return []
+            
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+            
+            # Handle both old format (direct list) and new format (with metadata)
+            if isinstance(cache_data, list):
+                # Old format - direct list of repositories
+                return cache_data
+            elif isinstance(cache_data, dict) and 'repositories' in cache_data:
+                # New format - with metadata wrapper
+                metadata = cache_data.get('metadata', {})
+                print(f"📅 Cache from: {metadata.get('fetch_timestamp', 'unknown')}")
+                print(f"🏢 Organization: {metadata.get('org', 'unknown')}")
+                return cache_data['repositories']
+            else:
+                print("Invalid cache file format")
+                return []
+                
+        except json.JSONDecodeError as e:
+            print(f"Error parsing cache file {cache_file}: {str(e)}")
+            return []
+        except Exception as e:
+            print(f"Error loading cache file {cache_file}: {str(e)}")
+            return []
     
     def analyze_repository(self, repo: Dict, show_progress: bool = True) -> Dict[str, Any]:
         """

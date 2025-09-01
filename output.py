@@ -47,7 +47,11 @@ def save_to_csv(data: List[Dict[str, Any]], filename: str) -> None:
     csv_data = []
     for repo in data:
         repo_copy = repo.copy()
-        repo_copy['code_types'] = ', '.join(repo['code_types'])
+        # Handle missing code_types field
+        if 'code_types' in repo and repo['code_types']:
+            repo_copy['code_types'] = ', '.join(repo['code_types'])
+        else:
+            repo_copy['code_types'] = ''
         csv_data.append(repo_copy)
     
     # Get all unique keys for CSV headers
@@ -80,7 +84,11 @@ def save_to_excel(data: List[Dict[str, Any]], filename: str) -> None:
     excel_data = []
     for repo in data:
         repo_copy = repo.copy()
-        repo_copy['code_types'] = ', '.join(repo['code_types'])
+        # Handle missing code_types field
+        if 'code_types' in repo and repo['code_types']:
+            repo_copy['code_types'] = ', '.join(repo['code_types'])
+        else:
+            repo_copy['code_types'] = ''
         excel_data.append(repo_copy)
     
     # Create DataFrame

@@ -14,6 +14,7 @@ Environment variables:
 """
 
 import argparse
+import os
 from datetime import datetime
 from analyzer import GitHubRepoAnalyzer
 from output import generate_all_outputs
@@ -101,6 +102,22 @@ Environment Variables:
         action='store_true',
         help='Disable progress bar (useful for non-terminal environments)'
     )
+    parser.add_argument(
+        '--fetch-only',
+        action='store_true',
+        help='Only fetch data from GitHub API and save to cache file (no analysis)'
+    )
+    parser.add_argument(
+        '--analyze-only',
+        type=str,
+        metavar='CACHE_FILE',
+        help='Analyze data from existing cache file instead of fetching from GitHub'
+    )
+    parser.add_argument(
+        '--cache-file',
+        type=str,
+        help='Specify cache file path (default: auto-generated based on org and timestamp)'
+    )
     
     args = parser.parse_args()
     
@@ -109,40 +126,89 @@ Environment Variables:
     token = args.token or token
     org = args.org or org
     
-    # Validate required arguments
-    validate_required_args(token, org)
+    # Validate mode-specific arguments
+    if args.analyze_only:
+        # For analyze-only mode, we don't need token/org validation
+        if not os.path.exists(args.analyze_only):
+            print(f"❌ Cache file not found: {args.analyze_only}")
+            return
+        print(f"📊 Analyze-only mode: using cache file {args.analyze_only}")
+    else:
+        # For fetch modes, validate token and org
+        validate_required_args(token, org)
+        
+    if args.fetch_only and args.analyze_only:
+        print("❌ Cannot use --fetch-only and --analyze-only together")
+        return
     
     # Setup SSL warnings
     setup_ssl_warnings(not args.no_ssl_verify)
     
-    # Initialize analyzer
-    analyzer = GitHubRepoAnalyzer(token, org, api_url=args.api_url, verify_ssl=not args.no_ssl_verify)
-    
-    # Analyze repositories
-    print(f"Starting analysis of repositories for organization: {org}")
     start_time = datetime.now()
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
     try:
-        # Detect if running in a terminal
-        show_progress = should_show_progress(args.no_progress)
-        
-        # Get repositories (with optional language filtering via GitHub API)
-        repos = analyzer.get_all_repos(languages=args.languages)
-        
-        # Limit number of repositories if specified
-        if args.limit and args.limit < len(repos):
-            repos = repos[:args.limit]
-            print(f"Limited analysis to first {args.limit} repositories")
-        
-        # Analyze repositories
-        repo_data = analyzer.analyze_repositories(repos, show_progress=show_progress, repo_filter=args.repos)
+        if args.analyze_only:
+            # Mode 2: Analyze existing cached data
+            print(f"📊 Loading cached data from: {args.analyze_only}")
+            # Create a temporary analyzer just for loading data
+            temp_analyzer = GitHubRepoAnalyzer("dummy", "dummy")
+            cached_data = temp_analyzer.load_cached_data(args.analyze_only)
+            
+            if not cached_data:
+                print("❌ No data found in cache file or invalid format.")
+                return
+                
+            print(f"✅ Loaded {len(cached_data)} repositories from cache")
+            org = cached_data[0].get('org', 'unknown') if cached_data else 'unknown'
+            
+            # Re-analyze cached data with current quality configuration (no API calls)
+            print("🔄 Re-analyzing with current quality configuration...")
+            repo_data = temp_analyzer._reanalyze_cached_data(cached_data, show_progress=should_show_progress(args.no_progress))
+            
+        else:
+            # Mode 1: Fetch data from GitHub
+            analyzer = GitHubRepoAnalyzer(token, org, api_url=args.api_url, verify_ssl=not args.no_ssl_verify)
+            
+            print(f"🔍 Fetching repositories for organization: {org}")
+            show_progress = should_show_progress(args.no_progress)
+            
+            # Get repositories (with optional language filtering via GitHub API)
+            repos = analyzer.get_all_repos(languages=args.languages)
+            
+            # Limit number of repositories if specified
+            if args.limit and args.limit < len(repos):
+                repos = repos[:args.limit]
+                print(f"Limited analysis to first {args.limit} repositories")
+            
+            if args.fetch_only:
+                # Mode 1a: Fetch-only mode - collect data and save to cache
+                print("📥 Fetch-only mode: collecting data from GitHub...")
+                repo_data = analyzer.fetch_repositories_data(repos, show_progress=show_progress, repo_filter=args.repos)
+                
+                if not repo_data:
+                    print("No repositories found or fetched.")
+                    return
+                
+                # Save to cache file
+                cache_file = args.cache_file or f"{org}_cache_{timestamp}.json"
+                analyzer.save_cached_data(repo_data, cache_file)
+                
+                print(f"✅ Data cached to: {cache_file}")
+                print(f"📊 Fetched {len(repo_data)} repositories")
+                print(f"🔄 To analyze: python main.py --analyze-only {cache_file}")
+                return
+                
+            else:
+                # Mode 1b: Full mode - fetch and analyze
+                print(f"🔍 Full mode: fetching and analyzing repositories...")
+                repo_data = analyzer.analyze_repositories(repos, show_progress=show_progress, repo_filter=args.repos)
         
         if not repo_data:
             print("No repositories found or analyzed.")
             return
         
         # Generate output files
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         base_filename = f"{org}_repos_{timestamp}"
         
         # Save to different formats
@@ -152,9 +218,9 @@ Environment Variables:
         end_time = datetime.now()
         duration = end_time - start_time
         
-        print(f"\nAnalysis completed!")
-        print(f"Analyzed {len(repo_data)} repositories in {duration}")
-        print(f"Files saved in directory: {args.output_dir}")
+        print(f"\n✅ Analysis completed!")
+        print(f"📊 Analyzed {len(repo_data)} repositories in {duration}")
+        print(f"📁 Files saved in directory: {args.output_dir}")
         
     except KeyboardInterrupt:
         print("\nAnalysis interrupted by user.")

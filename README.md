@@ -221,13 +221,26 @@ The script generates three files with timestamps:
 
 **Note on Direct Pushes**: The `direct_pushes_to_default` field analyzes the last 100 commits on the default branch and counts those not associated with any pull request. This provides an indication of commits pushed directly to the main branch without going through the PR process.
 
-**Quality Score Calculation**: The `quality_score` (0-100) is calculated based on:
-- **PR Review Quality (40 pts)**: Percentage of PRs reviewed by others, penalties for self-approvals
-- **Branch Discipline (25 pts)**: Low ratio of direct pushes to total commits
-- **Documentation (20 pts)**: Percentage of PRs with meaningful descriptions
-- **Collaboration (15 pts)**: Number of contributors to the repository
+## Quality Score Calculation
 
-The `quality_justification` field provides a detailed English explanation of how the score was calculated.
+The `quality_score` (0-100) is calculated using configurable rules defined in `quality_config.json`. The system applies various penalties based on development practices:
+
+### Major Penalties
+- **No Pull Requests (-50%)**: Repositories without any PRs receive a major penalty
+- **High Direct Push Ratio (-25%)**: Excessive commits directly to main branch (threshold: 30%)
+- **High Self-Approval Rate (-25%)**: Too many PRs approved by their own authors (threshold: 50%)
+
+### Minor Penalties  
+- **Poor PR Documentation (-10%)**: Less than 50% of PRs have meaningful descriptions
+- **Low External Review (-15%)**: Less than 30% of PRs reviewed by others
+- **Single Contributor (-10%)**: Repository has only one contributor
+- **Inactive Repository (-5%)**: No commits in the last 365 days
+- **No Commits (-10%)**: Repository has no development activity
+
+### Configuration
+All scoring rules are customizable in `quality_config.json`. See `QUALITY_SCORING.md` for detailed examples and configuration options.
+
+The `quality_justification` field provides a detailed explanation of how the score was calculated, including specific penalties applied.
 
 ## Code Type Detection
 

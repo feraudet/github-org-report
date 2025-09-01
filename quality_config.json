@@ -1,0 +1,97 @@
+{
+  "quality_scoring": {
+    "description": "Configuration for repository quality scoring rules",
+    "base_score": 100,
+    "penalties": {
+      "no_prs": {
+        "description": "Repository has no pull requests",
+        "penalty_percent": 50,
+        "message": "No pull requests found - major collaboration issue"
+      },
+      "no_pr_descriptions": {
+        "description": "PRs without meaningful descriptions",
+        "penalty_percent": 15,
+        "threshold": 0.7,
+        "message": "Poor PR documentation practices"
+      },
+      "high_self_approval": {
+        "description": "High rate of self-approved PRs",
+        "penalty_percent": 25,
+        "threshold": 0.5,
+        "message": "High self-approval rate reduces code review quality"
+      },
+      "low_external_review": {
+        "description": "Low rate of external PR reviews",
+        "penalty_percent": 20,
+        "threshold": 0.5,
+        "message": "Insufficient external code review"
+      },
+      "high_direct_pushes": {
+        "description": "High ratio of direct pushes to main branch",
+        "penalty_percent": 25,
+        "threshold": 0.3,
+        "message": "Poor branch discipline with excessive direct pushes"
+      },
+      "single_contributor": {
+        "description": "Repository has only one contributor",
+        "penalty_percent": 10,
+        "message": "Limited collaboration with single contributor"
+      },
+      "inactive_repository": {
+        "description": "Repository with no recent activity",
+        "penalty_percent": 10,
+        "days_threshold": 180,
+        "message": "Repository appears inactive"
+      },
+      "no_commits": {
+        "description": "Repository has no commits",
+        "penalty_percent": 10,
+        "message": "No development activity found"
+      },
+      "large_prs": {
+        "description": "PRs with too many files changed",
+        "penalty_percent": 5,
+        "files_threshold": 15,
+        "message": "PRs should be focused and reviewable"
+      },
+      "slow_review_response": {
+        "description": "PRs with slow review response time",
+        "penalty_percent": 5,
+        "days_threshold": 7,
+        "message": "Slow review response impacts team velocity"
+      }
+    },
+    "bonuses": {
+      "good_external_review": {
+        "description": "High rate of external PR reviews",
+        "bonus_percent": 0,
+        "threshold": 0.7,
+        "message": "Excellent external review practices"
+      },
+      "good_branch_discipline": {
+        "description": "Low ratio of direct pushes",
+        "bonus_percent": 0,
+        "threshold": 0.2,
+        "message": "Good branch discipline maintained"
+      },
+      "active_collaboration": {
+        "description": "Multiple contributors working together",
+        "bonus_percent": 0,
+        "min_contributors": 5,
+        "message": "Active collaborative development"
+      },
+      "recent_activity": {
+        "description": "Recent development activity",
+        "bonus_percent": 0,
+        "days_threshold": 30,
+        "message": "Active development with recent commits"
+      }
+    },
+    "weights": {
+      "pr_review_quality": 40,
+      "branch_discipline": 25,
+      "documentation": 20,
+      "collaboration": 15
+    }
+  }
+}
