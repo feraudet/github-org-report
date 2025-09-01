@@ -429,6 +429,7 @@ class GitHubRepoAnalyzer:
         """
         total_commits = 0
         last_commit_date = None
+<<<<<<< Updated upstream
         
         # Try to get commit count from contributors API (most reliable)
         contributors_data = self.make_request(f"{self.base_url}/repos/{self.org}/{repo_name}/stats/contributors")
@@ -436,6 +437,15 @@ class GitHubRepoAnalyzer:
             # Sum up all commits from all contributors
             total_commits = sum(contributor.get('total', 0) for contributor in contributors_data)
         
+=======
+        
+        # Try to get commit count from contributors API (most reliable)
+        contributors_data = self.make_request(f"{self.base_url}/repos/{self.org}/{repo_name}/stats/contributors")
+        if contributors_data and isinstance(contributors_data, list):
+            # Sum up all commits from all contributors
+            total_commits = sum(contributor.get('total', 0) for contributor in contributors_data)
+        
+>>>>>>> Stashed changes
         # Fallback to pagination method if contributors API fails
         if total_commits == 0:
             total_commits, last_commit_date = self._get_commits_via_pagination(repo_name, default_branch)
@@ -546,10 +556,10 @@ class GitHubRepoAnalyzer:
         Returns:
             Dictionary with comprehensive PR review analysis
         """
-        # Get recent closed PRs for analysis
+        # First try to get closed PRs via search API
         search_url = f"{self.base_url}/search/issues"
         search_params = {
-            'q': f'repo:{self.org}/{repo_name} type:pr state:closed',
+            'q': f'repo:{self.org}/{repo_name} is:pr is:closed',
             'per_page': 100,  # Analyze last 100 closed PRs
             'sort': 'updated',
             'order': 'desc'
@@ -557,13 +567,78 @@ class GitHubRepoAnalyzer:
         
         search_response = requests.get(search_url, headers=self.headers, params=search_params, verify=self.verify_ssl)
         
-        if search_response.status_code != 200:
-            return self._empty_pr_analysis()
+        if search_response.status_code == 200:
+            search_data = search_response.json()
+            prs = search_data.get('items', [])
+            
+            if prs:
+                print(f"Found {len(prs)} closed PRs for {repo_name} via search API")
+                return self._analyze_closed_prs(repo_name, prs)
+            else:
+                print(f"No closed PRs found via search API for {repo_name}")
+        else:
+            print(f"Search API failed for {repo_name}: {search_response.status_code} - {search_response.text[:200]}")
         
-        search_data = search_response.json()
-        prs = search_data.get('items', [])
+        # Fallback: try direct pulls API with proper pagination
+        print(f"Trying direct pulls API for {repo_name}...")
+        pulls_url = f"{self.base_url}/repos/{self.org}/{repo_name}/pulls"
         
-        return self._analyze_closed_prs(repo_name, prs)
+        # Get closed PRs with pagination
+        all_closed_prs = []
+        page = 1
+        max_pages = 5  # Limit to first 500 PRs (5 pages * 100 per page)
+        
+        while page <= max_pages:
+            closed_params = {
+                'state': 'closed', 
+                'per_page': 100, 
+                'sort': 'updated', 
+                'direction': 'desc',
+                'page': page
+            }
+            closed_response = requests.get(pulls_url, headers=self.headers, params=closed_params, verify=self.verify_ssl)
+            
+            if closed_response.status_code == 200:
+                closed_prs = closed_response.json()
+                if not closed_prs:  # No more PRs
+                    break
+                    
+                all_closed_prs.extend(closed_prs)
+                print(f"Found {len(closed_prs)} closed PRs on page {page} for {repo_name}")
+                
+                if len(closed_prs) < 100:  # Last page
+                    break
+                    
+                page += 1
+            else:
+                print(f"Pulls API failed on page {page} for {repo_name}: {closed_response.status_code}")
+                break
+        
+        if all_closed_prs:
+            print(f"Total: {len(all_closed_prs)} closed PRs found via pulls API for {repo_name}")
+            # Convert pulls API format to search API format for compatibility
+            formatted_prs = []
+            for pr in all_closed_prs:
+                formatted_pr = {
+                    'number': pr['number'],
+                    'title': pr['title'],
+                    'body': pr['body'],
+                    'user': pr['user'],
+                    'created_at': pr['created_at'],
+                    'updated_at': pr['updated_at'],
+                    'pull_request': {
+                        'merged_at': pr.get('merged_at')
+                    }
+                }
+                formatted_prs.append(formatted_pr)
+            
+            return self._analyze_closed_prs(repo_name, formatted_prs)
+        else:
+            print(f"No closed PRs found via pulls API for {repo_name}")
+        
+        # If both methods fail, return empty analysis
+        print(f"No PRs found for analysis in {repo_name}")
+        return self._empty_pr_analysis()
     
     def _empty_pr_analysis(self) -> Dict[str, Any]:
         """Return empty PR analysis structure."""
