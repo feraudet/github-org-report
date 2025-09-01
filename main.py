@@ -26,6 +26,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.worksheet.table import Table, TableStyleInfo
+import urllib3
 
 
 class GitHubRepoAnalyzer:
@@ -594,6 +595,10 @@ def main():
     
     # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Suppress SSL warnings if SSL verification is disabled
+    if args.no_ssl_verify:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     # Initialize analyzer
     analyzer = GitHubRepoAnalyzer(token, org, api_url=args.api_url, verify_ssl=not args.no_ssl_verify)
